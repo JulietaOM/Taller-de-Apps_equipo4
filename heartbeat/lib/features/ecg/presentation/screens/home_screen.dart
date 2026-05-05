@@ -1,6 +1,8 @@
 import 'dart:async';
-import 'package:flutter/material.dart';
+
 import 'package:fl_chart/fl_chart.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../data/services/ble_ecg_service.dart';
@@ -29,11 +31,10 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
 
     _bleService = BleEcgService(
-      deviceName: 'ECG_Device', // 👈 debe coincidir con ESP32
+      deviceName: 'ECG_Device',
     );
   }
 
-  // 🔐 Permisos BLE
   Future<void> requestBlePermissions() async {
     await [
       Permission.bluetoothScan,
@@ -42,10 +43,99 @@ class _HomeScreenState extends State<HomeScreen> {
     ].request();
   }
 
-  // 🔌 Conectar al ESP32
-  Future<void> _connect() async {
-    debugPrint("Botón conectar presionado");
+  String _deviceName(ScanResult result) {
+    final platformName = result.device.platformName;
+    final advName = result.advertisementData.advName;
 
+    if (platformName.isNotEmpty) return platformName;
+    if (advName.isNotEmpty) return advName;
+
+    return 'Dispositivo sin nombre';
+  }
+
+  Future<ScanResult?> _pickBleDevice() async {
+    await _bleService.startDeviceScan(
+      timeout: const Duration(seconds: 15),
+    );
+
+    if (!mounted) {
+      await _bleService.stopDeviceScan();
+      return null;
+    }
+
+    final selected = await showDialog<ScanResult>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Dispositivos BLE'),
+        content: StreamBuilder<List<ScanResult>>(
+          stream: _bleService.scanResults,
+          builder: (context, snapshot) {
+            final results = _sortedUniqueResults(snapshot.data ?? []);
+
+            if (results.isEmpty) {
+              return const SizedBox(
+                width: double.maxFinite,
+                height: 140,
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(),
+                      SizedBox(height: 16),
+                      Text('Escaneando dispositivos cercanos...'),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            return SizedBox(
+              width: double.maxFinite,
+              height: 360,
+              child: ListView.separated(
+                itemCount: results.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final result = results[index];
+                  final name = _deviceName(result);
+
+                  return ListTile(
+                    title: Text(name),
+                    subtitle: Text(
+                      '${result.device.remoteId} | RSSI: ${result.rssi}',
+                    ),
+                    onTap: () => Navigator.of(context).pop(result),
+                  );
+                },
+              ),
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancelar'),
+          ),
+        ],
+      ),
+    );
+
+    await _bleService.stopDeviceScan();
+
+    return selected;
+  }
+
+  List<ScanResult> _sortedUniqueResults(List<ScanResult> results) {
+    final byId = <String, ScanResult>{};
+
+    for (final result in results) {
+      byId[result.device.remoteId.toString()] = result;
+    }
+
+    return byId.values.toList()..sort((a, b) => b.rssi.compareTo(a.rssi));
+  }
+
+  Future<void> _connect() async {
     setState(() {
       _isConnecting = true;
       _status = 'Pidiendo permisos...';
@@ -55,20 +145,26 @@ class _HomeScreenState extends State<HomeScreen> {
       await requestBlePermissions();
 
       setState(() {
-        _status = 'Buscando dispositivo...';
+        _status = 'Escaneando dispositivos BLE...';
       });
 
-      final device = await _bleService.scanAndConnect(
-        timeout: const Duration(seconds: 10),
-      );
+      final selected = await _pickBleDevice();
 
-      if (device == null) {
+      if (selected == null) {
         setState(() {
-          _status = 'No se encontró ECG_Device';
+          _status = 'No se selecciono dispositivo';
           _isConnecting = false;
         });
         return;
       }
+
+      final selectedName = _deviceName(selected);
+
+      setState(() {
+        _status = 'Conectando a $selectedName...';
+      });
+
+      final device = await _bleService.connectToDevice(selected.device);
 
       await _ecgSub?.cancel();
       _ecgSub = _bleService.ecgStream.listen((sample) {
@@ -78,7 +174,6 @@ class _HomeScreenState extends State<HomeScreen> {
           _spots.add(FlSpot(_x.toDouble(), _currentValue));
           _x++;
 
-          // mantener buffer de ~250 muestras
           if (_spots.length > 250) {
             _spots.removeAt(0);
           }
@@ -99,7 +194,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // 🔌 Desconectar
   Future<void> _disconnect() async {
     await _ecgSub?.cancel();
     await _bleService.disconnect();
@@ -140,7 +234,6 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
-            // 🔹 Estado y valor actual
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -148,10 +241,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 Text('ECG: ${_currentValue.toStringAsFixed(0)}'),
               ],
             ),
-
             const SizedBox(height: 12),
-
-            // 🔹 Botones
             Row(
               children: [
                 ElevatedButton(
@@ -165,10 +255,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ],
             ),
-
             const SizedBox(height: 20),
-
-            // 🔹 Gráfica ECG
             Expanded(
               child: Card(
                 elevation: 3,
