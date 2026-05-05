@@ -1,0 +1,37 @@
+# Misc
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+
+# Flutter / Dart
+.dart_tool/
+.pub/
+.pub-cache/
+build/
+coverage/
+
+# Android
+/android/.gradle/
+/android/local.properties
+/android/app/debug
+/android/app/profile
+/android/app/release
+/android/ndk/
+/android/sdk/
+
+# iOS
+ios/Pods/
+
+# Flutter internals
+.flutter-plugins-dependencies
+**/ios/Flutter/.last_build_id
+
+# Docs
+**/doc/api/
