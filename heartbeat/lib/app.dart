@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'features/ecg/presentation/screens/home_screen.dart';
+import 'features/ecg/presentation/screens/profile_screen.dart';
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -7,14 +7,14 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ECG Monitor',
+      title: 'Heartbeat',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        brightness: Brightness.dark,
+        brightness: Brightness.light,
         useMaterial3: true,
-        colorSchemeSeed: Colors.red,
+        colorSchemeSeed: const Color(0xFFF78B94),
       ),
-      home: const HomeScreen(), // 👈 aquí conectas tu pantalla principal
+      home: const ProfileScreen(),
     );
   }
 }
