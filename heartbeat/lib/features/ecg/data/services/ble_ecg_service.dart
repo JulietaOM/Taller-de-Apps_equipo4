@@ -19,13 +19,59 @@ class BleEcgService {
 
   final StreamController<int> _ecgController = StreamController<int>.broadcast();
   Stream<int> get ecgStream => _ecgController.stream;
-  Stream<List<ScanResult>> get scanResults => FlutterBluePlus.scanResults;
+  Stream<List<ScanResult>> get scanResults => _throttleScanResults(
+        FlutterBluePlus.scanResults,
+        const Duration(milliseconds: 1200),
+      );
 
   BluetoothDevice? _device;
   BluetoothCharacteristic? _characteristic;
 
   StreamSubscription<List<ScanResult>>? _scanSub;
   StreamSubscription<List<int>>? _valueSub;
+
+  Stream<List<ScanResult>> _throttleScanResults(
+    Stream<List<ScanResult>> source,
+    Duration interval,
+  ) {
+    late final StreamController<List<ScanResult>> controller;
+    StreamSubscription<List<ScanResult>>? subscription;
+    Timer? timer;
+    List<ScanResult>? latestResults;
+
+    void emitLatest() {
+      timer = null;
+      final results = latestResults;
+      latestResults = null;
+
+      if (results != null && !controller.isClosed) {
+        controller.add(results);
+      }
+    }
+
+    controller = StreamController<List<ScanResult>>(
+      onListen: () {
+        subscription = source.listen(
+          (results) {
+            latestResults = results;
+            timer ??= Timer(interval, emitLatest);
+          },
+          onError: controller.addError,
+          onDone: () {
+            timer?.cancel();
+            emitLatest();
+            controller.close();
+          },
+        );
+      },
+      onCancel: () async {
+        timer?.cancel();
+        await subscription?.cancel();
+      },
+    );
+
+    return controller.stream;
+  }
 
   Future<void> ensureBluetoothReady() async {
     final supported = await FlutterBluePlus.isSupported;
@@ -149,8 +195,8 @@ class BleEcgService {
     await FlutterBluePlus.startScan(
       timeout: timeout,
       continuousUpdates: true,
-      continuousDivisor: 1,
-      androidScanMode: AndroidScanMode.lowLatency,
+      continuousDivisor: 4,
+      androidScanMode: AndroidScanMode.balanced,
       androidUsesFineLocation: true,
       androidCheckLocationServices: true,
     );
@@ -165,14 +211,28 @@ class BleEcgService {
   Future<BluetoothDevice> connectToDevice(BluetoothDevice device) async {
     await FlutterBluePlus.stopScan();
     await _scanSub?.cancel();
+    _scanSub = null;
+
+    if (_device != null && _device!.remoteId != device.remoteId) {
+      await disconnect();
+    }
 
     _device = device;
 
-    try {
+    if (_device!.isDisconnected) {
       debugPrint('Conectando a ${device.remoteId}...');
-      await _device!.connect(timeout: const Duration(seconds: 15));
-    } catch (e) {
-      debugPrint('Conexion inicial fallo o ya estaba conectado: $e');
+      try {
+        await _device!.connect(timeout: const Duration(seconds: 15));
+      } catch (e) {
+        if (_device!.isDisconnected) {
+          _device = null;
+          rethrow;
+        }
+
+        debugPrint(
+          'Conexion inicial fallo, pero el dispositivo quedo conectado: $e',
+        );
+      }
     }
 
     await _discoverAndSubscribe();
@@ -243,16 +303,31 @@ class BleEcgService {
 
   Future<void> disconnect() async {
     await _valueSub?.cancel();
+    _valueSub = null;
     await _scanSub?.cancel();
+    _scanSub = null;
 
+    final characteristic = _characteristic;
     _characteristic = null;
+
+    if (characteristic != null && characteristic.isNotifying) {
+      try {
+        await characteristic.setNotifyValue(false);
+      } catch (e) {
+        debugPrint('No se pudieron apagar notificaciones BLE: $e');
+      }
+    }
 
     if (_device != null) {
       try {
-        await _device!.disconnect();
-      } catch (_) {}
+        await _device!.disconnect(queue: false);
+      } catch (e) {
+        debugPrint('Desconexion BLE fallo o ya estaba desconectado: $e');
+      }
       _device = null;
     }
+
+    await Future<void>.delayed(const Duration(milliseconds: 500));
   }
 
   Future<void> dispose() async {

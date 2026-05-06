@@ -15,6 +15,12 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static const int _sampleRateHz = 250;
+  static const int _visibleSeconds = 5;
+  static const int _maxVisibleSamples = _sampleRateHz * _visibleSeconds;
+  static const double _adcMin = 0;
+  static const double _adcMax = 4095;
+
   late final BleEcgService _bleService;
 
   StreamSubscription<int>? _ecgSub;
@@ -25,6 +31,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _status = 'Desconectado';
   bool _isConnecting = false;
+  bool _isConnected = false;
 
   @override
   void initState() {
@@ -51,6 +58,16 @@ class _HomeScreenState extends State<HomeScreen> {
     if (advName.isNotEmpty) return advName;
 
     return 'Dispositivo sin nombre';
+  }
+
+  bool _hasDeviceName(ScanResult result) {
+    return result.device.platformName.isNotEmpty ||
+        result.advertisementData.advName.isNotEmpty;
+  }
+
+  bool _isTargetDevice(ScanResult result) {
+    return result.device.platformName == _bleService.deviceName ||
+        result.advertisementData.advName == _bleService.deviceName;
   }
 
   Future<ScanResult?> _pickBleDevice() async {
@@ -132,7 +149,24 @@ class _HomeScreenState extends State<HomeScreen> {
       byId[result.device.remoteId.toString()] = result;
     }
 
-    return byId.values.toList()..sort((a, b) => b.rssi.compareTo(a.rssi));
+    return byId.values.toList()
+      ..sort((a, b) {
+        final targetComparison =
+            (_isTargetDevice(b) ? 1 : 0).compareTo(_isTargetDevice(a) ? 1 : 0);
+
+        if (targetComparison != 0) {
+          return targetComparison;
+        }
+
+        final namedComparison =
+            (_hasDeviceName(b) ? 1 : 0).compareTo(_hasDeviceName(a) ? 1 : 0);
+
+        if (namedComparison != 0) {
+          return namedComparison;
+        }
+
+        return b.rssi.compareTo(a.rssi);
+      });
   }
 
   Future<void> _connect() async {
@@ -174,7 +208,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _spots.add(FlSpot(_x.toDouble(), _currentValue));
           _x++;
 
-          if (_spots.length > 250) {
+          if (_spots.length > _maxVisibleSamples) {
             _spots.removeAt(0);
           }
         });
@@ -182,6 +216,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _status = 'Conectado a ${device.platformName}';
+        _isConnected = true;
         _isConnecting = false;
       });
     } catch (e) {
@@ -189,21 +224,36 @@ class _HomeScreenState extends State<HomeScreen> {
 
       setState(() {
         _status = 'Error: $e';
+        _isConnected = false;
         _isConnecting = false;
       });
     }
   }
 
   Future<void> _disconnect() async {
-    await _ecgSub?.cancel();
-    await _bleService.disconnect();
-
     setState(() {
-      _status = 'Desconectado';
-      _spots.clear();
-      _x = 0;
-      _currentValue = 0;
+      _isConnecting = true;
+      _status = 'Desconectando...';
     });
+
+    try {
+      await _ecgSub?.cancel();
+      _ecgSub = null;
+      await _bleService.disconnect();
+    } catch (e) {
+      debugPrint('ERROR al desconectar BLE: $e');
+    } finally {
+      if (!mounted) return;
+
+      setState(() {
+        _status = 'Desconectado';
+        _isConnected = false;
+        _isConnecting = false;
+        _spots.clear();
+        _x = 0;
+        _currentValue = 0;
+      });
+    }
   }
 
   @override
@@ -216,15 +266,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final minX = _spots.isEmpty ? 0.0 : _spots.first.x;
-    final maxX = _spots.isEmpty ? 100.0 : _spots.last.x;
-
-    final minY = _spots.isEmpty
-        ? 0.0
-        : _spots.map((e) => e.y).reduce((a, b) => a < b ? a : b) - 50;
-
-    final maxY = _spots.isEmpty
-        ? 4095.0
-        : _spots.map((e) => e.y).reduce((a, b) => a > b ? a : b) + 50;
+    final maxX = _spots.isEmpty ? _maxVisibleSamples.toDouble() : _spots.last.x;
 
     return Scaffold(
       appBar: AppBar(
@@ -245,12 +287,13 @@ class _HomeScreenState extends State<HomeScreen> {
             Row(
               children: [
                 ElevatedButton(
-                  onPressed: _isConnecting ? null : _connect,
+                  onPressed: (_isConnecting || _isConnected) ? null : _connect,
                   child: const Text('Conectar'),
                 ),
                 const SizedBox(width: 12),
                 OutlinedButton(
-                  onPressed: _disconnect,
+                  onPressed:
+                      (_isConnecting || !_isConnected) ? null : _disconnect,
                   child: const Text('Desconectar'),
                 ),
               ],
@@ -265,8 +308,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     LineChartData(
                       minX: minX,
                       maxX: maxX,
-                      minY: minY,
-                      maxY: maxY,
+                      minY: _adcMin,
+                      maxY: _adcMax,
                       gridData: const FlGridData(show: false),
                       borderData: FlBorderData(show: true),
                       titlesData: const FlTitlesData(show: false),
