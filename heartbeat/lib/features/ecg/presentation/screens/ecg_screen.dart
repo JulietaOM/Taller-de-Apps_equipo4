@@ -6,6 +6,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../data/services/ble_ecg_service.dart';
+import '../../data/domain/heart_rate_calculator.dart';
 
 class EcgScreen extends StatefulWidget {
   const EcgScreen({
@@ -41,21 +42,33 @@ class _EcgScreenState extends State<EcgScreen> {
   late final BleEcgService _bleService;
   StreamSubscription<int>? _ecgSub;
 
-  // ── Estado ───────────────────────────────────────────────────────
+  // ── ECG / HR ─────────────────────────────────────────────────────
   final List<FlSpot> _spots = [];
   int _x = 0;
 
-  String _status       = 'Desconectado';
-  bool _isConnecting   = false;
-  bool _isConnected    = false;
+  late HeartRateCalculator _hrCalc;
+  int           _bpm  = 0;
+  HeartRateZone _zone = HeartRateZone.none;
+
+  // ── Estado BLE ───────────────────────────────────────────────────
+  String _status      = 'Desconectado';
+  bool _isConnecting  = false;
+  bool _isConnected   = false;
 
   // ── Alertas ──────────────────────────────────────────────────────
-  bool _alertsEnabled  = true;
+  bool _alertsEnabled = true;
+
+  // ── Snackbar anti-spam ───────────────────────────────────────────
+  DateTime? _lastAlertTime;
 
   @override
   void initState() {
     super.initState();
     _bleService = BleEcgService(deviceName: 'ECG_Device');
+    _hrCalc = HeartRateCalculator(
+      sampleRateHz: _sampleRateHz,
+      age: int.tryParse(widget.age) ?? 25,
+    );
   }
 
   @override
@@ -74,15 +87,18 @@ class _EcgScreenState extends State<EcgScreen> {
     ].request();
   }
 
-  // ── Helpers de nombre ─────────────────────────────────────────────
+  // ── Helpers nombre ────────────────────────────────────────────────
   String _deviceName(ScanResult r) {
     if (r.device.platformName.isNotEmpty) return r.device.platformName;
-    if (r.advertisementData.advName.isNotEmpty) return r.advertisementData.advName;
+    if (r.advertisementData.advName.isNotEmpty) {
+      return r.advertisementData.advName;
+    }
     return 'Sin nombre';
   }
 
   bool _hasName(ScanResult r) =>
-      r.device.platformName.isNotEmpty || r.advertisementData.advName.isNotEmpty;
+      r.device.platformName.isNotEmpty ||
+      r.advertisementData.advName.isNotEmpty;
 
   bool _isTarget(ScanResult r) =>
       r.device.platformName == _bleService.deviceName ||
@@ -103,7 +119,7 @@ class _EcgScreenState extends State<EcgScreen> {
       });
   }
 
-  // ── Diálogo de selección BLE ─────────────────────────────────────
+  // ── Diálogo BLE ──────────────────────────────────────────────────
   Future<ScanResult?> _pickDevice() async {
     await _bleService.startDeviceScan(timeout: const Duration(seconds: 15));
     if (!mounted) {
@@ -212,13 +228,29 @@ class _EcgScreenState extends State<EcgScreen> {
 
       final device = await _bleService.connectToDevice(selected.device);
 
+      _hrCalc.reset();
+
       await _ecgSub?.cancel();
       _ecgSub = _bleService.ecgStream.listen((sample) {
+        final prevZone = _zone;
+        final updated = _hrCalc.addSample(sample.toDouble());
+
         setState(() {
           _spots.add(FlSpot(_x.toDouble(), sample.toDouble()));
           _x++;
           if (_spots.length > _maxVisibleSamples) _spots.removeAt(0);
+
+          if (updated) {
+            _bpm  = _hrCalc.bpm;
+            _zone = _hrCalc.zone;
+          }
         });
+
+        // Alerta si cambió de zona
+        if (updated && _alertsEnabled && _zone != prevZone &&
+            _zone != HeartRateZone.none && prevZone != HeartRateZone.none) {
+          _showZoneAlert(_zone);
+        }
       });
 
       setState(() {
@@ -256,13 +288,83 @@ class _EcgScreenState extends State<EcgScreen> {
       _isConnected  = false;
       _isConnecting = false;
       _spots.clear();
-      _x = 0;
+      _x   = 0;
+      _bpm = 0;
+      _zone = HeartRateZone.none;
     });
+    _hrCalc.reset();
+  }
+
+  // ── Alerta de zona ────────────────────────────────────────────────
+  void _showZoneAlert(HeartRateZone zone) {
+    // Anti-spam: máximo una alerta cada 5 segundos
+    final now = DateTime.now();
+    if (_lastAlertTime != null &&
+        now.difference(_lastAlertTime!).inSeconds < 5) {
+      return;
+    }
+    _lastAlertTime = now;
+
+    if (!mounted) return;
+
+    final zoneColor = Color(zone.colorValue);
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: zoneColor,
+        duration: const Duration(seconds: 4),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.all(16),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        content: Row(
+          children: [
+            const Icon(Icons.favorite, color: Colors.white, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Cambio de zona cardiaca',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
+                      fontFamily: 'serif',
+                    ),
+                  ),
+                  Text(
+                    zone.label,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontFamily: 'serif',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(
+              '$_bpm lpm',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+                fontSize: 15,
+                fontFamily: 'serif',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ── Build ────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
+    final zoneColor = Color(_zone.colorValue);
+
     return Scaffold(
       backgroundColor: _white,
       endDrawer: _buildAlertDrawer(),
@@ -330,17 +432,19 @@ class _EcgScreenState extends State<EcgScreen> {
             // ── Frecuencia cardiaca ────────────────────────────────
             _InfoTile(
               label: 'Frecuencia cardiaca:',
-              value: '— lpm',
+              value: _bpm > 0 ? '$_bpm lpm' : '— lpm',
               color: _pale,
+              valueColor: _bpm > 0 ? _primary : null,
             ),
 
             const Divider(thickness: 2, color: _pale, height: 1),
 
             // ── Zona ──────────────────────────────────────────────
             _InfoTile(
-              label: 'Zona de frecuencia cardiaca:',
-              value: '—',
+              label: 'Zona cardiaca:',
+              value: _zone.label,
               color: _pale,
+              valueColor: _zone == HeartRateZone.none ? null : zoneColor,
             ),
 
             const Divider(thickness: 2, color: _pale, height: 1),
@@ -351,7 +455,9 @@ class _EcgScreenState extends State<EcgScreen> {
               child: Row(
                 children: [
                   Icon(
-                    _isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+                    _isConnected
+                        ? Icons.bluetooth_connected
+                        : Icons.bluetooth_disabled,
                     color: _isConnected ? _primary : Colors.grey,
                     size: 18,
                   ),
@@ -375,17 +481,13 @@ class _EcgScreenState extends State<EcgScreen> {
     );
   }
 
-  // ── Panel con botones (cuando está desconectado) ──────────────────
+  // ── Panel con botones (desconectado) ──────────────────────────────
   Widget _buildConnectPanel() {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.monitor_heart_outlined,
-            size: 48,
-            color: _soft,
-          ),
+          Icon(Icons.monitor_heart_outlined, size: 48, color: _soft),
           const SizedBox(height: 16),
           const Text(
             'Sin señal ECG',
@@ -399,7 +501,6 @@ class _EcgScreenState extends State<EcgScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Botón Conectar
               ElevatedButton.icon(
                 onPressed: (_isConnecting || _isConnected) ? null : _connect,
                 icon: const Icon(Icons.bluetooth_searching, size: 18),
@@ -415,17 +516,14 @@ class _EcgScreenState extends State<EcgScreen> {
                     horizontal: 20,
                     vertical: 10,
                   ),
-                  textStyle: const TextStyle(
-                    fontFamily: 'serif',
-                    fontSize: 15,
-                  ),
+                  textStyle: const TextStyle(fontFamily: 'serif', fontSize: 15),
                   elevation: 0,
                 ),
               ),
               const SizedBox(width: 12),
-              // Botón Desconectar
               OutlinedButton.icon(
-                onPressed: (_isConnecting || !_isConnected) ? null : _disconnect,
+                onPressed:
+                    (_isConnecting || !_isConnected) ? null : _disconnect,
                 icon: const Icon(Icons.bluetooth_disabled, size: 18),
                 label: const Text('Desconectar'),
                 style: OutlinedButton.styleFrom(
@@ -439,10 +537,7 @@ class _EcgScreenState extends State<EcgScreen> {
                     horizontal: 20,
                     vertical: 10,
                   ),
-                  textStyle: const TextStyle(
-                    fontFamily: 'serif',
-                    fontSize: 15,
-                  ),
+                  textStyle: const TextStyle(fontFamily: 'serif', fontSize: 15),
                 ),
               ),
             ],
@@ -452,10 +547,7 @@ class _EcgScreenState extends State<EcgScreen> {
             const SizedBox(
               width: 20,
               height: 20,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: _primary,
-              ),
+              child: CircularProgressIndicator(strokeWidth: 2, color: _primary),
             ),
           ],
         ],
@@ -465,7 +557,8 @@ class _EcgScreenState extends State<EcgScreen> {
 
   // ── Gráfica ECG en vivo ───────────────────────────────────────────
   Widget _buildChart() {
-    final minX = _spots.isEmpty ? 0.0 : _spots.first.x;
+    final minX =
+        _spots.isEmpty ? 0.0 : _spots.first.x;
     final maxX = _spots.isEmpty
         ? _maxVisibleSamples.toDouble()
         : (_spots.first.x + _maxVisibleSamples);
@@ -480,20 +573,15 @@ class _EcgScreenState extends State<EcgScreen> {
               maxX: maxX,
               minY: _adcMin,
               maxY: _adcMax,
-              clipData: const FlClipData.all(),
               gridData: FlGridData(
                 show: true,
                 drawVerticalLine: true,
                 horizontalInterval: 1024,
                 verticalInterval: 250,
-                getDrawingHorizontalLine: (_) => FlLine(
-                  color: _pale,
-                  strokeWidth: 1,
-                ),
-                getDrawingVerticalLine: (_) => FlLine(
-                  color: _pale,
-                  strokeWidth: 1,
-                ),
+                getDrawingHorizontalLine: (_) =>
+                    FlLine(color: _pale, strokeWidth: 1),
+                getDrawingVerticalLine: (_) =>
+                    FlLine(color: _pale, strokeWidth: 1),
               ),
               borderData: FlBorderData(
                 show: true,
@@ -516,14 +604,15 @@ class _EcgScreenState extends State<EcgScreen> {
             ),
           ),
         ),
-        // Botón desconectar superpuesto (esquina superior derecha)
+        // Chip desconectar
         Positioned(
           top: 6,
           right: 6,
           child: GestureDetector(
             onTap: _isConnecting ? null : _disconnect,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
               decoration: BoxDecoration(
                 color: _pale,
                 borderRadius: BorderRadius.circular(20),
@@ -559,43 +648,69 @@ class _EcgScreenState extends State<EcgScreen> {
         child: Drawer(
           backgroundColor: _white,
           child: Column(
-            mainAxisSize: MainAxisSize.max,
             children: [
               const SizedBox(height: 80),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-                child: const Text(
-                  'ALERTA\nFrecuencia cardiaca elevada',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontFamily: 'serif',
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF444444),
-                    height: 1.5,
-                  ),
+              Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+                child: Column(
+                  children: [
+                    Icon(
+                      Icons.notifications_active,
+                      color: _alertsEnabled ? _primary : Colors.grey,
+                      size: 40,
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Alertas de zona\ncardiaca',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontFamily: 'serif',
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF444444),
+                        height: 1.5,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Se notifica cada vez que\ncambias de zona cardiaca.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontFamily: 'serif',
+                        fontSize: 13,
+                        color: Colors.grey.shade600,
+                        height: 1.5,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 8),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Text(
-                    'Activar alertas',
+                  Text(
+                    _alertsEnabled ? 'Activadas' : 'Desactivadas',
                     style: TextStyle(
                       fontFamily: 'serif',
                       fontSize: 15,
-                      color: Color(0xFF666666),
+                      color: _alertsEnabled ? _primary : Colors.grey,
                     ),
                   ),
                   const SizedBox(width: 12),
                   Switch.adaptive(
                     value: _alertsEnabled,
-                    activeThumbColor: _soft,
+                    activeThumbColor: _white,
                     activeTrackColor: _soft,
                     onChanged: (v) => setState(() => _alertsEnabled = v),
                   ),
                 ],
+              ),
+              const SizedBox(height: 32),
+              // Leyenda de zonas
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 24),
+                child: _ZoneLegend(),
               ),
             ],
           ),
@@ -605,17 +720,19 @@ class _EcgScreenState extends State<EcgScreen> {
   }
 }
 
-// ── Tile de info (FC / Zona) ──────────────────────────────────────────────────
+// ── Tile de info ──────────────────────────────────────────────────────────────
 class _InfoTile extends StatelessWidget {
   const _InfoTile({
     required this.label,
     required this.value,
     required this.color,
+    this.valueColor,
   });
 
   final String label;
   final String value;
-  final Color color;
+  final Color  color;
+  final Color? valueColor;
 
   @override
   Widget build(BuildContext context) {
@@ -637,14 +754,74 @@ class _InfoTile extends StatelessWidget {
           ),
           Text(
             value,
-            style: const TextStyle(
+            style: TextStyle(
               fontFamily: 'serif',
               fontSize: 15,
-              color: Color(0xFF888888),
+              fontWeight: FontWeight.w600,
+              color: valueColor ?? const Color(0xFF888888),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+// ── Leyenda de zonas en el drawer ─────────────────────────────────────────────
+class _ZoneLegend extends StatelessWidget {
+  const _ZoneLegend();
+
+  static const _zones = [
+    HeartRateZone.rest,
+    HeartRateZone.zone1,
+    HeartRateZone.zone2,
+    HeartRateZone.zone3,
+    HeartRateZone.zone4,
+    HeartRateZone.zone5,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Zonas',
+          style: TextStyle(
+            fontFamily: 'serif',
+            fontSize: 14,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF444444),
+          ),
+        ),
+        const SizedBox(height: 8),
+        ..._zones.map(
+          (z) => Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Row(
+              children: [
+                Container(
+                  width: 12,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: Color(z.colorValue),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  z.label,
+                  style: const TextStyle(
+                    fontFamily: 'serif',
+                    fontSize: 12,
+                    color: Color(0xFF555555),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
